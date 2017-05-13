@@ -14,6 +14,7 @@ executable haven
                , containers
                , http-conduit
                , http-types
+               , mtl
                , SHA
                , xml
   hs-source-dirs:      src
