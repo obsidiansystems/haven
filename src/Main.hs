@@ -90,13 +90,10 @@ fetch (mirror:fallbacks) mgr mvn = do
                    else Nothing
   reqPom <- parseRequest $ url ".pom"
   reqJar <- parseRequest $ url ".jar"
-  print $ "Fetching: " <> url ".pom"
   pom <- httpLbs reqPom mgr
   jar <- httpLbs reqJar mgr
   if responseStatus jar /= status200 && responseStatus pom /= status200
-    then do
-      putStrLn "Not found in this mirror!"
-      fetch fallbacks mgr mvn
+    then fetch fallbacks mgr mvn
     else return $
       let Just e = parseXMLDoc $ responseBody pom
           mvnNix = MavenNix
@@ -106,7 +103,7 @@ fetch (mirror:fallbacks) mgr mvn = do
             }
       in (mvnNix, e)
 fetch [] _ mvn = error $ mconcat
-  [ "Could not find "
+  [ "Error: Could not find "
   , _maven_groupId mvn
   , ":"
   , _maven_artifactId mvn
@@ -140,9 +137,7 @@ recurseDependencies mgr mvn = do
   when (not $ any (\mvnNix -> _mavenNix_maven mvnNix == mvn) s) $ do
     (mvnNix, e) <- liftIO $ fetch mirrors mgr mvn
     modify $ Set.insert mvnNix
-    let d = getDepsFor e
-    liftIO $ print d
-    void $ traverse (recurseDependencies mgr) d
+    void $ traverse (recurseDependencies mgr) $ getDepsFor e
 
 -- | Retrieve an XML Element's children by tag name
 findChildrenByTagName :: String -> Element -> [Element]
