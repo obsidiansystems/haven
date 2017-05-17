@@ -23,15 +23,15 @@ directory, so haven won't pollute your home directory.
   <repositories>
     <repository>
       <id>maven</id>
-      <url>https://repo1.maven.org/maven2</url>
+      <url>https://repo1.maven.org/maven2/</url>
     </repository>
     <repository>
       <id>central</id>
-      <url>https://central.maven.org/maven2</url>
+      <url>https://central.maven.org/maven2/</url>
     </repository>
     <repository>
       <id>jcenter</id>
-      <url>https://jcenter.bintray.com</url>
+      <url>https://jcenter.bintray.com/</url>
     </repository>
   </repositories>
 
