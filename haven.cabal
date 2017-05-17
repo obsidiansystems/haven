@@ -15,6 +15,9 @@ executable haven
   build-depends: base >=4.9 && <4.10
                , bytestring
                , containers
+               , http-conduit
+               , http-types
+               , mtl
                , SHA
                , xml
                , process
