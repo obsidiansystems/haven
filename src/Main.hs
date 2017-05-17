@@ -4,17 +4,20 @@ module Main where
 
 import Control.Applicative
 import Control.Monad
-import Control.Monad.IO.Class
+import Control.Monad.Reader
+import Control.Monad.Trans.Maybe
+import Control.Monad.Writer hiding ((<>))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.Digest.Pure.SHA
 import Data.Foldable
-import Data.Function
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
 import Data.Semigroup
+import qualified Data.Set as Set
+import Data.Traversable
 import Network.HTTP.Conduit hiding (path)
 import Network.HTTP.Types.Status
 import System.Directory
@@ -25,8 +28,6 @@ import System.IO
 import System.IO.Temp
 import System.Process
 import Text.XML.Light
-import Control.Monad.Reader
-import Control.Monad.Trans.Maybe
 
 data HavenEnv = HavenEnv
   { _havenEnv_manager :: Manager
@@ -56,11 +57,10 @@ main = do
     ExitSuccess <- waitForProcess hProc
 
     _ <- hGetLine hTmpFile -- skip local package name
-    putStrLn "["
-    fix $ \loop -> do
-      e <- hIsEOF hTmpFile
+    (_, mavenNixs) <- runWriterT $ fix $ \loop -> do
+      e <- liftIO $ hIsEOF hTmpFile
       unless e $ do
-        line <- hGetLine hTmpFile
+        line <- liftIO $ hGetLine hTmpFile
         let mavenGrArTyVr = dropWhile (not . isAlphaNum) line -- Skip leading symbols; we don't care about parsing this
             (groupId, ':':mavenArTyVr) = break (==':') mavenGrArTyVr
             (artifactId, ':':mavenTyVr) = break (==':') mavenArTyVr
@@ -68,14 +68,16 @@ main = do
             version = takeWhile (/=':') mavenVr -- Version number
             maven = Maven groupId artifactId version
         unless (all isSpace line) $ do
-          mMvnNix <- runReaderT (fetch fileType maven) havenEnv
+          mMvnNix <- runReaderT (runMaybeT $ fetch fileType maven) havenEnv
           case mMvnNix of
-            Just mvnNix -> putStrLn $ toNix mvnNix
-            Nothing -> do
+            Just mvnNix -> tell $ Set.fromList mvnNix
+            Nothing -> liftIO $ do
               hPutStrLn stderr $ "Failed for " <> unlines [show fileType, show maven]
               exitFailure
           loop
-  putStrLn "]"
+    putStrLn "["
+    traverse_ (putStrLn . toNix) mavenNixs
+    putStrLn "]"
 
 parseRepos :: Element -> Map String String
 parseRepos pom = Map.fromList $ do
@@ -161,8 +163,8 @@ fetch
   :: (MonadIO m, MonadReader HavenEnv m)
   => String
   -> Maven
-  -> m (Maybe MavenNix)
-fetch fileType mvn = runMaybeT $ do
+  -> MaybeT m [MavenNix]
+fetch fileType mvn = do
   m2Repo <- asks _havenEnv_m2Local
   let m2Dir = m2Repo </> m2Directory mvn
       findRepoId = takeWhile (/='=') . drop 1 . dropWhile (/='>')
@@ -170,21 +172,29 @@ fetch fileType mvn = runMaybeT $ do
   repoId <- findRepoId <$> liftIO (readFile (m2Dir </> "_remote.repositories"))
   repo <- getRepo repoId
 
-  pomSha <- runMaybeT $ getArtifactFile mvn ".pom" repo
+  pom <- runMaybeT $ getArtifactFile mvn ".pom" repo
   
   let noArtifacts = MavenNix
         { _mavenNix_maven = mvn
         , _mavenNix_repo = repo
         , _mavenNix_jarSha256 = Nothing
-        , _mavenNix_pomSha256 = sha256 <$> pomSha
+        , _mavenNix_pomSha256 = sha256 <$> pom
         , _mavenNix_aarSha256 = Nothing
         }
 
+  parents <- fmap (fromMaybe []) $ for pom $ \pomContents -> do
+    pomEl <- maybe empty pure $ parseXMLDoc pomContents
+    fmap mconcat $ traverse (fetch "pom") $ do
+      parent <- findChildrenByTagName "parent" pomEl
+      groupId <- strContent <$> findChildrenByTagName "groupId" parent
+      artifactId <- strContent <$> findChildrenByTagName "artifactId" parent
+      version <- strContent <$> findChildrenByTagName "version" parent
+      return $ Maven groupId artifactId version
 
   -- TODO: Match the 'type' to the correct file extension.
   -- The extension is _usually_ equal to the type, but it's not necessarily.
   -- See: https://maven.apache.org/pom.html#Dependencies
-  asum
+  mavenNix <- asum
     [ do
       guard (fileType == "jar")
       jarSha <- sha256 <$> getArtifactFile mvn ".jar" repo
@@ -193,7 +203,11 @@ fetch fileType mvn = runMaybeT $ do
       guard (fileType == "aar")
       aarSha <- sha256 <$> getArtifactFile mvn ".aar" repo
       return $ noArtifacts { _mavenNix_jarSha256 = Just aarSha }
+    , do
+      guard (fileType == "pom") -- This is used when getting parents
+      return noArtifacts
     ]
+  return (mavenNix:parents)
 
 -- | Retrieve an XML Element's children by tag name
 findChildrenByTagName :: String -> Element -> [Element]
