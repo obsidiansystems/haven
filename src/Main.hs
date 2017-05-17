@@ -116,10 +116,45 @@ toNix m =
       , "    aarSha256 = " <> showHash (_mavenNix_aarSha256 m) <> "; }"
       ]
 
+-- | Gets the repo with the given id, calling 'empty' when it's not present
 getRepo :: (MonadReader HavenEnv m, MonadPlus m) => String -> m String
 getRepo repoId = do
   repos <- asks _havenEnv_repos
   maybe empty pure $ Map.lookup repoId repos
+
+m2Directory :: Maven -> String
+m2Directory mvn = foldl (</>) ""
+  [ (\x -> if x == '.' then '/' else x) <$> _maven_groupId mvn
+  , _maven_artifactId mvn
+  , _maven_version mvn
+  ]
+
+-- | Gets a given artifact for a 'Maven' and hashes it. It will first
+-- check the local m2 dir, and then it will try to download it from
+-- the online repo. If both fail, an error is logged to 'stderr', and
+-- 'empty' is called.
+getArtifactFile
+  :: (MonadIO m, MonadPlus m, MonadReader HavenEnv m)
+  => Maven
+  -> String
+  -> String
+  -> m BL.ByteString
+getArtifactFile mvn ext repo = do
+  mgr <- asks _havenEnv_manager
+  m2Repo <- asks _havenEnv_m2Local
+  let m2Dir = m2Directory mvn
+      m2Filename = _maven_artifactId mvn <> "-" <> _maven_version mvn <> ext
+      path = m2Repo </> m2Dir </> m2Filename
+  m2ArtifactExists <- liftIO $ doesFileExist path
+  if m2ArtifactExists then liftIO (BL.readFile path) else do
+    let url = repo </> m2Dir </> m2Filename
+    req <- liftIO $ parseRequest url
+    liftIO $ hPutStrLn stderr $ "Getting URL: " <> url
+    rsp <- liftIO $ httpLbs req mgr
+    when (responseStatus rsp /= status200) $ do
+      liftIO $ hPutStrLn stderr $ "Failed to get URL: " <> url
+      empty
+    return $ responseBody rsp
 
 -- | Hash a particular maven package's .pom and .jar files and parse the .pom file as xml
 fetch
@@ -129,42 +164,22 @@ fetch
   -> m (Maybe MavenNix)
 fetch fileType mvn = runMaybeT $ do
   m2Repo <- asks _havenEnv_m2Local
-  let component = foldl (</>) ""
-        [ (\x -> if x == '.' then '/' else x) <$> _maven_groupId mvn
-        , _maven_artifactId mvn
-        , _maven_version mvn
-        ]
-      m2Dir = m2Repo </> component
-      m2Filename ext = _maven_artifactId mvn <> "-" <> _maven_version mvn <> ext
+  let m2Dir = m2Repo </> m2Directory mvn
       findRepoId = takeWhile (/='=') . drop 1 . dropWhile (/='>')
 
   repoId <- findRepoId <$> liftIO (readFile (m2Dir </> "_remote.repositories"))
   repo <- getRepo repoId
 
-  let shaArtifact ext = do
-        mgr <- asks _havenEnv_manager
-        let path = m2Dir </> m2Filename ext
-        m2ArtifactExists <- liftIO $ doesFileExist path
-        contents <- if m2ArtifactExists then liftIO (BL.readFile path) else do
-          let url = repo </> component </> m2Filename ext
-          req <- liftIO $ parseRequest url
-          liftIO $ hPutStrLn stderr $ "Getting URL: " <> url
-          rsp <- liftIO $ httpLbs req mgr
-          when (responseStatus rsp /= status200) $ do
-            liftIO $ hPutStrLn stderr $ "Failed to get URL: " <> url
-            empty
-          return $ responseBody rsp
-        return $ sha256 contents
-
-  pomSha <- runMaybeT $ shaArtifact ".pom"
+  pomSha <- runMaybeT $ getArtifactFile mvn ".pom" repo
   
   let noArtifacts = MavenNix
         { _mavenNix_maven = mvn
         , _mavenNix_repo = repo
         , _mavenNix_jarSha256 = Nothing
-        , _mavenNix_pomSha256 = pomSha
+        , _mavenNix_pomSha256 = sha256 <$> pomSha
         , _mavenNix_aarSha256 = Nothing
         }
+
 
   -- TODO: Match the 'type' to the correct file extension.
   -- The extension is _usually_ equal to the type, but it's not necessarily.
@@ -172,11 +187,11 @@ fetch fileType mvn = runMaybeT $ do
   asum
     [ do
       guard (fileType == "jar")
-      jarSha <- shaArtifact ".jar"
+      jarSha <- sha256 <$> getArtifactFile mvn ".jar" repo
       return $ noArtifacts { _mavenNix_jarSha256 = Just jarSha }
     , do
       guard (fileType == "aar")
-      aarSha <- shaArtifact ".aar"
+      aarSha <- sha256 <$> getArtifactFile mvn ".aar" repo
       return $ noArtifacts { _mavenNix_jarSha256 = Just aarSha }
     ]
 
