@@ -202,7 +202,7 @@ fetch fileType mvn = do
     , do
       guard (fileType == "aar")
       aarSha <- sha256 <$> getArtifactFile mvn ".aar" repo
-      return $ noArtifacts { _mavenNix_jarSha256 = Just aarSha }
+      return $ noArtifacts { _mavenNix_aarSha256 = Just aarSha }
     , do
       guard (fileType == "pom") -- This is used when getting parents
       return noArtifacts
