@@ -68,7 +68,6 @@ includes maven.
 #### Output
 
 ```bash
-$ haven com.google.guava:guava:17.0 com.google.code.gson:gson:2.2.4
 $ haven ./pom.xml
 ... # Maven logs on stderr
 
