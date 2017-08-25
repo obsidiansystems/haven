@@ -7,6 +7,9 @@ list of Maven dependencies. The primary output format is a list of
 the maven packages. Maven's local repo is redirected to a tmp
 directory, so haven won't pollute your home directory.
 
+`maven` is required in order to run `haven`. The provided `shell.nix` 
+includes maven.
+
 ### Example
 
 #### `pom.xml`
