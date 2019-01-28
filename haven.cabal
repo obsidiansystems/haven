@@ -2,13 +2,14 @@ name:                haven
 synopsis:            Recursively retrieve maven dependencies
 description:         A haskell project that retrieves maven package dependencies recursively given a starting set of packages. The primary output format is a list of nix sets describing the maven packages.
 category:            Java
-version:             0.2.0.0
+version:             0.2.0.1
 license:             BSD3
 license-file:        LICENSE
 author:              Ali Abrar, Will Fancher
 maintainer:          maintainer@obsidian.systems
 build-type:          Simple
 cabal-version:       >=1.10
+extra-source-files:  README.md
 
 executable haven
   main-is:             Main.hs
