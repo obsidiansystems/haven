@@ -1,9 +1,12 @@
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 
+import Prelude hiding (log)
 import Control.Applicative
 import Control.Monad
+import Control.Monad.Catch
 import Control.Monad.Reader
 import Control.Monad.Trans.Maybe
 import Control.Monad.Writer hiding ((<>))
@@ -17,6 +20,8 @@ import qualified Data.Map as Map
 import Data.Maybe
 import Data.Semigroup
 import qualified Data.Set as Set
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
 import Data.Traversable
 import Network.HTTP.Conduit hiding (path)
 import Network.HTTP.Types.Status
@@ -35,6 +40,10 @@ data HavenEnv = HavenEnv
   , _havenEnv_m2Local :: FilePath
   }
 
+
+log :: MonadIO m => T.Text -> m ()
+log t = liftIO $ T.hPutStrLn stderr t *> hFlush stderr
+
 -- | Takes multiple maven package descriptions as command line arguments
 -- and finds the dependencies of those maven packages.
 -- Package descriptions should be of the form @groupid:artifactid:version@
@@ -44,40 +53,52 @@ main = do
   [pomXml] <- getArgs
   Just repos <- fmap parseRepos . parseXMLDoc <$> BS.readFile pomXml
 
-  withSystemTempFile "out.txt" $ \tmpFile hTmpFile -> withSystemTempDirectory "m2" $ \m2Repo -> do
-    let havenEnv = HavenEnv mgr repos m2Repo
-    hProc <- runProcess
-      "mvn"
-      ["-f", pomXml, "dependency:tree", "-Dverbose", "-DoutputFile=" <> tmpFile, "-Dmaven.repo.local=" <> m2Repo]
-      Nothing
-      Nothing
-      Nothing
-      (Just stderr)
-      Nothing
-    ExitSuccess <- waitForProcess hProc
+  let
+    withStorePath :: (MonadIO m, MonadMask m) => (String -> m a) -> m a
+    withStorePath f = do
+      storePath' <- liftIO $ lookupEnv "HAVEN_STORE_PATH"
+      case storePath' of
+        Just storePath | not (null storePath) -> f storePath
+        _ -> withSystemTempDirectory "m2" f
 
-    _ <- hGetLine hTmpFile -- skip local package name
-    (_, mavenNixs) <- runWriterT $ fix $ \loop -> do
-      e <- liftIO $ hIsEOF hTmpFile
-      unless e $ do
-        line <- liftIO $ hGetLine hTmpFile
-        let mavenGrArTyVr = dropWhile (not . isAlphaNum) line -- Skip leading symbols; we don't care about parsing this
-            (groupId, ':':mavenArTyVr) = break (==':') mavenGrArTyVr
-            (artifactId, ':':mavenTyVr) = break (==':') mavenArTyVr
-            (fileType, ':':mavenVr) = break (==':') mavenTyVr -- File type that Maven has decided on
-            version = takeWhile (/=':') mavenVr -- Version number
-            maven = Maven groupId artifactId version
-        unless (all isSpace line) $ do
-          mMvnNix <- runReaderT (runMaybeT $ fetch fileType maven) havenEnv
-          case mMvnNix of
-            Just mvnNix -> tell $ Set.fromList mvnNix
-            Nothing -> liftIO $ do
-              hPutStrLn stderr $ "Failed for " <> unlines [show fileType, show maven]
-              exitFailure
-          loop
-    putStrLn "["
-    traverse_ (putStrLn . toNix) mavenNixs
-    putStrLn "]"
+  (_, mavenNixs) <- runWriterT $
+    withStorePath $ \m2Repo -> withSystemTempFile "out.txt" $ \tmpFile hTmpFile -> do
+      for_ ["tree", "resolve"] $ \mode -> do
+        let havenEnv = HavenEnv mgr repos m2Repo
+        hProc <- liftIO $ runProcess
+          "mvn"
+          ["-f", pomXml, "dependency:" <> mode, "-Dverbose", "-DoutputFile=" <> tmpFile, "-Dmaven.repo.local=" <> m2Repo]
+          Nothing
+          Nothing
+          Nothing
+          (Just stderr)
+          Nothing
+        ExitSuccess <- liftIO $ waitForProcess hProc
+
+        _ <- liftIO $ T.hGetLine hTmpFile -- skip first line which is the root of the tree or a blank line
+        fix $ \loop -> do
+          e <- liftIO $ hIsEOF hTmpFile
+          unless e $ do
+            line <- fmap T.strip $ liftIO $ T.hGetLine hTmpFile
+            log $ ">> " <> line
+
+            unless (T.null line || line == "The following files have been resolved:") $ do
+              let (packageDesc, notes) = T.span (/= ' ') $ T.dropWhile (not . isAlphaNum) line
+              case False of -- "omitted" `T.isInfixOf` notes
+                True -> loop <* log ("Skipping omitted: " <> packageDesc <> " (" <> notes)
+                False -> case map T.unpack $ T.splitOn ":" $ T.strip packageDesc of
+                  [groupId, artifactId, fileType, version, _] -> do
+                    let maven = Maven groupId artifactId version
+                    mMvnNix <- runReaderT (runMaybeT $ fetch fileType maven) havenEnv
+                    case mMvnNix of
+                      Just mvnNix -> tell $ Set.fromList mvnNix
+                      Nothing -> error $ "Failed for " <> unlines [show fileType, show maven]
+                  _ -> error $ "Failed to parse line: " <> T.unpack line
+            loop
+
+  putStrLn "["
+  traverse_ (putStrLn . toNix) mavenNixs
+  putStrLn "]"
 
 parseRepos :: Element -> Map String String
 parseRepos pom = Map.fromList $ do
@@ -151,10 +172,10 @@ getArtifactFile mvn ext repo = do
   if m2ArtifactExists then liftIO (BL.readFile path) else do
     let url = repo </> m2Dir </> m2Filename
     req <- liftIO $ parseRequest url
-    liftIO $ hPutStrLn stderr $ "Getting URL: " <> url
+    log $ "Getting URL: " <> T.pack url
     rsp <- liftIO $ httpLbs req mgr
     when (responseStatus rsp /= status200) $ do
-      liftIO $ hPutStrLn stderr $ "Failed to get URL: " <> url
+      log $ "Failed to get URL: " <> T.pack url
       empty
     return $ responseBody rsp
 
@@ -173,7 +194,7 @@ fetch fileType mvn = do
   repo <- getRepo repoId
 
   pom <- runMaybeT $ getArtifactFile mvn ".pom" repo
-  
+
   let noArtifacts = MavenNix
         { _mavenNix_maven = mvn
         , _mavenNix_repo = repo
