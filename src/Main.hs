@@ -12,6 +12,7 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Char
 import Data.Digest.Pure.SHA
 import Data.Foldable
+import Data.Function (fix)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe
